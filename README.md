@@ -2,6 +2,10 @@
 
 一个基于Flutter的跨平台管理后台，用于配置和管理NapCat AI助手系统。
 
+该项目仅支持项目
+https://github.com/dpineer/napcat_backend
+进行前端的管理,其他后端均未作适配
+
 ## 🚀 功能特性
 
 - **系统概览**: 实时显示后端连接状态、LLM模型信息和知识库统计
