@@ -114,39 +114,86 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<dynamic> _postWithResponse(String endpoint, Map<String, dynamic> data) async {
+    try {
+      isLoading = true;
+      notifyListeners();
+      final response = await http.post(
+        Uri.parse('$baseUrl$endpoint'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(data),
+      );
+      isLoading = false;
+      if (response.statusCode == 200) {
+        notifyListeners();
+        return jsonDecode(utf8.decode(response.bodyBytes));
+      } else {
+        errorMessage = 'Failed: ${response.body}';
+        notifyListeners();
+        return null;
+      }
+    } catch (e) {
+      isLoading = false;
+      errorMessage = e.toString();
+      notifyListeners();
+      return null;
+    }
+  }
+
   // Actions
   Future<void> fetchSystemConfig() async {
     final res = await _get('/api/config');
-    if (res != null) systemConfig = res;
+    if (res != null && res['data'] != null) {
+      systemConfig = res['data'];
+    }
   }
 
   Future<void> updateSystemConfig(Map<String, dynamic> newConfig) async {
-    await _post('/api/config', newConfig);
-    await fetchSystemConfig();
+    final res = await _postWithResponse('/api/config', newConfig);
+    if (res != null) {
+      await fetchSystemConfig();
+    }
   }
 
   Future<void> fetchKnowledge(String query) async {
-    // 模拟搜索，实际应调用 Rust 的 /api/knowledge?q=...
-    // 这里假设返回最近的学习记录
-    final res = await _get('/api/knowledge?limit=20'); 
-    if (res != null) knowledgeDocs = res is List ? res : [];
+    String endpoint = '/api/knowledge/list';
+    if (query.isNotEmpty) {
+      endpoint = '/api/knowledge?query=$query&limit=20';
+    }
+    final res = await _get(endpoint);
+    if (res != null && res['data'] != null) {
+      knowledgeDocs = res['data'] is List ? res['data'] : [];
+    }
   }
 
   Future<void> addKnowledge(String content) async {
-    await _post('/api/knowledge', {'content': content});
-    await fetchKnowledge('');
+    final res = await _postWithResponse('/api/knowledge', {'content': content});
+    if (res != null) {
+      await fetchKnowledge('');
+    }
   }
   
-  // 模拟提示词获取，对应 Rust 的 PromptManager
   Future<void> fetchPrompts() async {
-    // 假设后端返回类似 {"Chat": {...}, "Learn": {...}}
     final res = await _get('/api/prompts');
-    if (res != null) prompts = res;
+    if (res != null && res['data'] != null) {
+      prompts = res['data'];
+    }
   }
 
   Future<void> updatePrompt(String type, Map<String, dynamic> template) async {
-     await _post('/api/prompts', {'type': type, 'template': template});
-     await fetchPrompts();
+     final res = await _postWithResponse('/api/prompts', {'type': type, 'template': template});
+     if (res != null) {
+       await fetchPrompts();
+     }
+  }
+
+  Future<void> deleteKnowledge(String id) async {
+    final response = await http.delete(
+      Uri.parse('$baseUrl/api/knowledge/$id'),
+    );
+    if (response.statusCode == 200) {
+      await fetchKnowledge('');
+    }
   }
 }
 
@@ -222,8 +269,22 @@ class _MainLayoutState extends State<MainLayout> {
 // --- Pages ---
 
 // 1. Dashboard Page
-class DashboardPage extends StatelessWidget {
+class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
+
+  @override
+  State<DashboardPage> createState() => _DashboardPageState();
+}
+
+class _DashboardPageState extends State<DashboardPage> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final state = context.read<AppState>();
+      state.fetchSystemConfig();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -244,16 +305,16 @@ class DashboardPage extends StatelessWidget {
                 icon: PhosphorIconsFill.plugsConnected,
               ),
               const SizedBox(width: 16),
-              const _StatusCard(
+              _StatusCard(
                 title: 'LLM 模型',
-                value: 'DeepSeek-V3', // 这里的实际值应从 API 获取
+                value: state.systemConfig['llm_model'] ?? '未配置', // 从API获取实际模型名称
                 color: Colors.blue,
                 icon: PhosphorIconsFill.brain,
               ),
               const SizedBox(width: 16),
-              const _StatusCard(
+              _StatusCard(
                 title: '知识条目',
-                value: '124 条', // 这里的实际值应从 API 获取
+                value: state.knowledgeDocs.length.toString() + ' 条', // 显示实际知识条目数量
                 color: Colors.orange,
                 icon: PhosphorIconsFill.database,
               ),
@@ -330,7 +391,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
   }
 
   void _loadData(Map<String, dynamic> config) {
-    _dbUrlCtrl.text = config['database_url'] ?? '';
+    _dbUrlCtrl.text = config['llm_base_url'] != null ? config['llm_base_url'] : config['database_url'] ?? '';
     _apiKeyCtrl.text = config['llm_api_key'] ?? '';
     _baseUrlCtrl.text = config['llm_base_url'] ?? '';
     _modelCtrl.text = config['llm_model'] ?? '';
@@ -412,17 +473,38 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
 }
 
 // 3. Prompt Manager Page
-class PromptManagerPage extends StatelessWidget {
+class PromptManagerPage extends StatefulWidget {
   const PromptManagerPage({super.key});
 
   @override
+  State<PromptManagerPage> createState() => _PromptManagerPageState();
+}
+
+class _PromptManagerPageState extends State<PromptManagerPage> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final state = context.read<AppState>();
+      state.fetchPrompts();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // 这里使用模拟数据，实际应从 state.prompts 获取
-    final templates = {
-      'Chat': {'desc': '标准聊天模式', 'system': '你是一个AI助手...'},
-      'Learn': {'desc': '学习模式', 'system': '你是一个知识管理助手...'},
-      'Creative': {'desc': '创意模式', 'system': '你是一个富有创意的AI...'},
-    };
+    final state = context.watch<AppState>();
+    
+    // 从state.prompts中提取数据
+    Map<String, dynamic> templates = {};
+    if (state.prompts['available_types'] != null && state.prompts['available_types'] is List) {
+      // 根据可用类型构建模板数据
+      for (String type in state.prompts['available_types']) {
+        templates[type] = {
+          'desc': _getDescriptionForType(type),
+          'system': '系统提示词模板',
+        };
+      }
+    }
 
     return Padding(
       padding: const EdgeInsets.all(24),
@@ -441,61 +523,85 @@ class PromptManagerPage extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 20),
-          Expanded(
-            child: GridView.builder(
-              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                maxCrossAxisExtent: 400,
-                childAspectRatio: 1.2,
-                crossAxisSpacing: 16,
-                mainAxisSpacing: 16,
-              ),
-              itemCount: templates.length,
-              itemBuilder: (ctx, index) {
-                final key = templates.keys.elementAt(index);
-                final data = templates[key]!;
-                return Card(
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    onTap: () => _showEditDialog(context, key, data),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                decoration: BoxDecoration(color: Colors.purple, borderRadius: BorderRadius.circular(4)),
-                                child: Text(key, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                              ),
-                              const Spacer(),
-                              const Icon(Icons.edit, size: 16),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          Text(data['desc']!, style: Theme.of(context).textTheme.bodyMedium),
-                          const Spacer(),
-                          Text(
-                            data['system']!, 
-                            maxLines: 3, 
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12),
-                          ),
-                        ],
+          if (state.isLoading && templates.isEmpty)
+            const Center(child: CircularProgressIndicator())
+          else if (templates.isEmpty)
+            const Center(child: Text('暂无提示词模板', style: TextStyle(color: Colors.grey)))
+          else
+            Expanded(
+              child: GridView.builder(
+                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                  maxCrossAxisExtent: 400,
+                  childAspectRatio: 1.2,
+                  crossAxisSpacing: 16,
+                  mainAxisSpacing: 16,
+                ),
+                itemCount: templates.length,
+                itemBuilder: (ctx, index) {
+                  final key = templates.keys.elementAt(index);
+                  final data = templates[key]!;
+                  return Card(
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () => _showEditDialog(context, key, data, state),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(color: Colors.purple, borderRadius: BorderRadius.circular(4)),
+                                  child: Text(key, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                                ),
+                                const Spacer(),
+                                const Icon(Icons.edit, size: 16),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Text(data['desc']!, style: Theme.of(context).textTheme.bodyMedium),
+                            const Spacer(),
+                            Text(
+                              data['system']!, 
+                              maxLines: 3, 
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  void _showEditDialog(BuildContext context, String type, Map<String, String> data) {
+  String _getDescriptionForType(String type) {
+    switch (type) {
+      case 'Chat':
+        return '标准聊天模式';
+      case 'Analyze':
+        return '深度分析模式';
+      case 'Creative':
+        return '创意写作模式';
+      case 'Professional':
+        return '专业助手模式';
+      case 'Learn':
+        return '学习助手模式';
+      case 'Friendly':
+        return '友好聊天模式';
+      default:
+        return '自定义模式';
+    }
+  }
+
+  void _showEditDialog(BuildContext context, String type, Map<String, String> data, AppState state) {
     final sysCtrl = TextEditingController(text: data['system']);
     showDialog(
       context: context,
@@ -519,7 +625,17 @@ class PromptManagerPage extends StatelessWidget {
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('保存')),
+          FilledButton(
+            onPressed: () {
+              // 更新提示词模板
+              state.updatePrompt(type, {
+                'system': sysCtrl.text,
+                'description': data['desc'] ?? _getDescriptionForType(type),
+              });
+              Navigator.pop(ctx);
+            },
+            child: const Text('保存'),
+          ),
         ],
       ),
     );
@@ -527,11 +643,19 @@ class PromptManagerPage extends StatelessWidget {
 }
 
 // 4. Knowledge Base Page
-class KnowledgeBasePage extends StatelessWidget {
+class KnowledgeBasePage extends StatefulWidget {
   const KnowledgeBasePage({super.key});
 
   @override
+  State<KnowledgeBasePage> createState() => _KnowledgeBasePageState();
+}
+
+class _KnowledgeBasePageState extends State<KnowledgeBasePage> {
+  String _searchQuery = '';
+
+  @override
   Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
     return Padding(
       padding: const EdgeInsets.all(24),
       child: Column(
@@ -550,11 +674,17 @@ class KnowledgeBasePage extends StatelessWidget {
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(30)),
                     contentPadding: const EdgeInsets.symmetric(horizontal: 16),
                   ),
+                  onChanged: (value) {
+                    setState(() {
+                      _searchQuery = value;
+                    });
+                    state.fetchKnowledge(value);
+                  },
                 ),
               ),
               const SizedBox(width: 16),
               FloatingActionButton.small(
-                onPressed: () => _showAddDialog(context),
+                onPressed: () => _showAddDialog(context, state),
                 child: const Icon(Icons.add),
               ),
             ],
@@ -562,18 +692,33 @@ class KnowledgeBasePage extends StatelessWidget {
           const SizedBox(height: 20),
           Expanded(
             child: Card(
-              child: ListView.separated(
-                itemCount: 10, // 模拟数据
-                separatorBuilder: (_, _) => const Divider(height: 1),
-                itemBuilder: (ctx, index) {
-                  return ListTile(
-                    leading: const CircleAvatar(child: Icon(Icons.article, size: 16)),
-                    title: Text('关于 Rust 所有权机制的解释 #$index'),
-                    subtitle: Text('2026-02-18 20:30 • 相似度 0.98', style: TextStyle(fontSize: 12, color: Colors.grey[500])),
-                    trailing: IconButton(icon: const Icon(Icons.delete_outline), onPressed: () {}),
-                  );
-                },
-              ),
+              child: state.knowledgeDocs.isEmpty
+                ? const Center(
+                    child: Text('暂无知识库条目', style: TextStyle(color: Colors.grey)),
+                  )
+                : ListView.separated(
+                    itemCount: state.knowledgeDocs.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (ctx, index) {
+                      final doc = state.knowledgeDocs[index];
+                      return ListTile(
+                        leading: const CircleAvatar(child: Icon(Icons.article, size: 16)),
+                        title: Text(doc['content'] != null 
+                            ? doc['content'].toString().length > 50 
+                              ? '${doc['content'].toString().substring(0, 50)}...' 
+                              : doc['content'].toString()
+                            : '未知内容'),
+                        subtitle: Text(
+                          'ID: ${doc['id'] ?? 'N/A'} • ${doc['created_at'] ?? 'N/A'}',
+                          style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline), 
+                          onPressed: () => _deleteKnowledge(context, state, doc['id']),
+                        ),
+                      );
+                    },
+                  ),
             ),
           ),
         ],
@@ -581,7 +726,7 @@ class KnowledgeBasePage extends StatelessWidget {
     );
   }
 
-  void _showAddDialog(BuildContext context) {
+  void _showAddDialog(BuildContext context, AppState state) {
     final ctrl = TextEditingController();
     showDialog(
       context: context,
@@ -599,10 +744,57 @@ class KnowledgeBasePage extends StatelessWidget {
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
           FilledButton(
             onPressed: () {
-              context.read<AppState>().addKnowledge(ctrl.text);
-              Navigator.pop(ctx);
+              if (ctrl.text.trim().isNotEmpty) {
+                state.addKnowledge(ctrl.text);
+                Navigator.pop(ctx);
+              }
             },
             child: const Text('添加'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _deleteKnowledge(BuildContext context, AppState state, String? id) async {
+    if (id == null) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('确认删除'),
+        content: const Text('确定要删除这个知识库条目吗？此操作不可撤销。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+            onPressed: () async {
+              // 调用后端API删除知识库条目
+              try {
+                final response = await http.delete(
+                  Uri.parse('${state.baseUrl}/api/knowledge/$id'),
+                );
+                if (response.statusCode == 200) {
+                  // 删除成功，刷新列表
+                  state.fetchKnowledge(_searchQuery);
+                  Navigator.pop(ctx);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('知识库条目删除成功')),
+                  );
+                } else {
+                  // 删除失败
+                  Navigator.pop(ctx);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('删除失败: ${response.body}')),
+                  );
+                }
+              } catch (e) {
+                // 网络错误
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('删除失败: $e')),
+                );
+              }
+            },
+            child: const Text('删除'),
           ),
         ],
       ),
